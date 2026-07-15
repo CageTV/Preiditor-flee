@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Preiditor flee/vcpkg_installed/vcpkg/blds/spdlog/x64-windows-rel/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
