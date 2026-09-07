@@ -1,30 +1,32 @@
 # Preditor Flee Fire
 
 An SKSE plugin for Skyrim Special Edition/Anniversary Edition. Wild predators, prey animals, and
-spriggans will flee from a lit torch/lantern held in hand, or from an actively-cast Fire spell —
-then stalk at a distance until the flame goes out, at which point they resume their own natural
-behavior (predators/spiders return to their normal hostility, prey become aggressive as an
-approximation since most prey species have no vanilla attack animations at all).
+spriggans will flee from a lit torch/lantern held in hand, or from an actively-cast Fire, Lightning,
+or Poison spell — then stalk at a distance until the deterrent goes away, at which point they
+resume their own natural behavior (predators/spiders return to their normal hostility, prey become
+aggressive as an approximation since most prey species have no vanilla attack animations at all).
 
 ## Features
 
 - **Detection**: triggers on a `TESObjectLIGH` (torch/lantern) equipped in either hand, or on
-  actively casting a Fire-elemental Destruction spell (Firebolt/Fireball/Flames) — checked via the
-  same resistance-type tagging the engine itself uses (`resistVariable == kResistFire`), not a
-  hardcoded spell list, so it works with modded fire spells too. Inventory items don't count —
-  only what's actually held/cast.
+  actively casting a Fire/Lightning/Poison-elemental Destruction spell (e.g. Firebolt, Sparks,
+  Poison Rune) — checked via the same resistance-type tagging the engine itself uses
+  (`resistVariable == kResistFire/kResistShock/kPoisonResist`), not a hardcoded spell list, so it
+  works with modded spells too. Each element is independently toggleable. Inventory items don't
+  count — only what's actually held/cast.
 - **Species coverage**: predators and frostbite spiders (gated on vanilla `PredatorFaction`),
   spriggans (their own separate `SprigganFaction` — they aren't members of `PredatorFaction`), and
   prey animals (vanilla `ActorTypeAnimal` keyword, checked on both the actor and its race). Horses,
   dragons, and boss-tier/unique NPCs are always excluded.
 - **Flee mechanism**: temporarily sets the creature's `Confidence` actor value to Cowardly while a
-  flame is present, then restores its original value once it's gone. This lets the engine's own
+  deterrent is present, then restores its original value once it's gone. This lets the engine's own
   combat AI make the flee decision continuously on every one of its own AI think-cycles, rather
   than fighting it with an externally-injected one-shot package (which proved unreliable in
   testing — the AI just kept re-asserting its normal attack behavior against an injected flee).
 - **In-game configuration menu** (requires [SKSEMenuFramework](https://www.nexusmods.com/skyrimspecialedition/mods/149705),
-  default open key F1): trigger/stalk range, attack cooldown, fire-spell-cast linger duration, and
-  a per-species toggle for every covered creature type.
+  default open key F1): trigger/stalk range, attack cooldown, spell-cast linger duration, a toggle
+  for each of Fire/Lightning/Poison spell detection, and a per-species toggle for every covered
+  creature type.
 
 ## Requirements
 
