@@ -1,7 +1,8 @@
 #include "Events.h"
 #include "Settings.h"
+#include "logger.h"
 
-namespace TMD_PFF
+namespace PFF
 {
     FleeManager* FleeManager::GetSingleton()
     {
@@ -9,111 +10,333 @@ namespace TMD_PFF
         return &singleton;
     }
 
-    void FleeManager::OnTick()
+    // A torch or lantern in Skyrim is a TESObjectLIGH equipped directly (not a weapon with a
+    // light attached) -- checking both hands for an equipped Light covers vanilla torches and
+    // any lantern mod that follows the same wieldable-light convention. This deliberately does
+    // NOT check inventory -- only what's actually equipped in a hand counts as "held".
+    RE::TESObjectLIGH* FleeManager::GetHeldLight(RE::Actor* actor)
     {
-        auto* settings = Settings::GetSingleton();
-        if (!settings->bEnabled) return;
-
-        static float timer = 0.0f;
-        timer += *RE::Offset::g_deltaTime;
-        if (timer < 0.5f) return; // run twice per second
-        timer = 0.0f;
-
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player || !player->GetParentCell()) return;
-
-        auto cell = player->GetParentCell();
-        std::vector<RE::TESObjectREFR*> fireSources;
-
-        // 1. Gather fire sources near player
-        cell->ForEachReferenceInRange(player->GetPosition(), settings->fDetectionRadius, [&](RE::TESObjectREFR& ref) {
-            if (IsFireSource(&ref)) fireSources.push_back(&ref);
-            return true;
-        });
-
-        if (fireSources.empty()) return;
-
-        // 2. Check predators near those fire sources
-        cell->ForEachReferenceInRange(player->GetPosition(), settings->fDetectionRadius * 2.0f, [&](RE::TESObjectREFR& ref) {
-            auto* actor = ref.As<RE::Actor>();
-            if (!actor || actor->IsDead() || actor->IsPlayerRef()) return true;
-            if (!IsPredator(actor)) return true;
-            if (IsOnCooldown(actor)) return true;
-
-            // 3. If predator is near any fire source, make it flee
-            for (auto* fire : fireSources) {
-                if (actor->GetPosition().GetDistance(fire->GetPosition()) <= settings->fDetectionRadius) {
-                    actor->SetFlee(true);
-                    actor->EvaluatePackage(); // force AI update
-                    SetCooldown(actor);
-                    RE::DebugNotification(std::format("{} flees from fire!", actor->GetName()).c_str());
-                    break;
-                }
-            }
-            return true;
-        });
+        if (!actor) return nullptr;
+        if (auto* right = actor->GetEquippedObject(false)) {
+            if (auto* light = right->As<RE::TESObjectLIGH>()) return light;
+        }
+        if (auto* left = actor->GetEquippedObject(true)) {
+            if (auto* light = left->As<RE::TESObjectLIGH>()) return light;
+        }
+        return nullptr;
     }
 
-    bool FleeManager::IsFireSource(RE::TESObjectREFR* ref)
+    // Actively invoking Destruction fire magic in a hand -- not merely having it equipped/selected
+    // (that's MagicCaster::State::kReady, which sits idle any time a spell is favorited/readied).
+    // Charging or casting is what actually produces visible flame, matching the "held lit torch"
+    // theme. Elemental type is read the same way the engine itself does: the effect's own
+    // EffectSetting.resistVariable == kResistFire (the field Flames/Firebolt/Fireball etc. carry).
+    bool FleeManager::IsCastingFireSpell(RE::Actor* actor)
     {
-        auto* settings = Settings::GetSingleton();
-        if (!ref) return false;
+        if (!actor) return false;
+        for (auto source : { RE::MagicSystem::CastingSource::kLeftHand, RE::MagicSystem::CastingSource::kRightHand }) {
+            auto* caster = actor->GetMagicCaster(source);
+            if (!caster || !caster->currentSpell) continue;
 
-        // Torches - check for torch keyword or equipped torch
-        if (settings->bDetectTorches && ref->HasKeywordString("Torch")) return true;
+            auto state = caster->state.get();
+            if (state != RE::MagicCaster::State::kCharging && state != RE::MagicCaster::State::kCasting) continue;
 
-        // Fire spells - check for active magic effect with fire keyword
-        if (settings->bDetectFireSpells) {
-            if (auto* actor = ref->As<RE::Actor>()) {
-                if (actor->GetMagicCaster(RE::MagicSystem::CastingSource::kLeftHand) ||
-                    actor->GetMagicCaster(RE::MagicSystem::CastingSource::kRightHand)) {
-                    // You'd check the active effect for fire keywords here
-                    return true; // simplified
+            for (auto* effect : caster->currentSpell->effects) {
+                if (effect && effect->baseEffect && effect->baseEffect->data.resistVariable == RE::ActorValue::kResistFire) {
+                    return true;
                 }
             }
         }
-
-        // Campfires - Furniture with fire keyword
-        if (settings->bDetectCampfires && ref->HasKeywordString("Fire")) return true;
-
         return false;
     }
 
-    bool FleeManager::IsPredator(RE::Actor* actor)
+    bool FleeManager::HasFireDeterrent(RE::Actor* actor)
+    {
+        return GetHeldLight(actor) != nullptr || IsCastingFireSpell(actor);
+    }
+
+    RE::TESObjectREFR* FleeManager::FindNearestLitLightHolder(RE::TESObjectCELL* cell, const RE::NiPoint3& origin, float radius)
+    {
+        RE::TESObjectREFR* nearest = nullptr;
+        float nearestDist = radius;
+
+        cell->ForEachReferenceInRange(origin, radius, [&](RE::TESObjectREFR& ref) {
+            auto* actor = ref.As<RE::Actor>();
+            if (!actor || actor->IsDead()) return RE::BSContainer::ForEachResult::kContinue;
+            if (!HasFireDeterrent(actor)) return RE::BSContainer::ForEachResult::kContinue;
+
+            float dist = origin.GetDistance(actor->GetPosition());
+            if (dist < nearestDist) {
+                nearest = actor;
+                nearestDist = dist;
+            }
+            return RE::BSContainer::ForEachResult::kContinue;
+        });
+
+        return nearest;
+    }
+
+    // SkyPatcher's keyword-framework rules (RKF_ActorType*, and vanilla ActorTypeHorse/
+    // ActorTypeDragon) patch the RACE record's keyword list, not the individual actor/NPC_
+    // record -- confirmed directly: e.g. the Helgen tutorial bear's own NPC_ record carries
+    // ZERO keywords at all, only its race (BearBrownRace) does. Actor and TESRace are separate
+    // BGSKeywordForm objects with independently-checked keyword lists, so actor->HasKeyword()
+    // alone silently misses every race-level keyword -- which is most creature classification
+    // in Skyrim. Must explicitly check both.
+    bool FleeManager::HasKeywordCascade(RE::Actor* actor, RE::BGSKeyword* keyword)
+    {
+        if (!actor || !keyword) return false;
+        if (actor->HasKeyword(keyword)) return true;
+        if (auto* race = actor->GetRace()) {
+            if (race->HasKeyword(keyword)) return true;
+        }
+        return false;
+    }
+
+    // Confirmed directly (2026-09-06 test session): SkyPatcher Keyword Framework's RKF_ActorType*
+    // keywords only get applied to races its own rules recognize by 3D model path. A creature
+    // VARIETY/replacer mod (e.g. Animallica's "Grey Wolf") can supply a custom race SkyPatcher's
+    // rules never match -- confirmed the actor carried zero RKF keywords, only that mod's own
+    // OCF_RaceAnimal* tags. RKF is therefore NOT reliable as the primary yes/no gate across a
+    // modded creature roster.
+    //
+    // The robust, native-vanilla signal instead: virtually every hostile wild creature (wolves,
+    // bears, sabre cats, trolls, frostbite spiders, ice wraiths) is a member of the vanilla
+    // "PredatorFaction" DIRECTLY on its own actor record (not just its race) -- confirmed via a
+    // live debug-HUD read showing both the Helgen tutorial bear AND the Helgen frostbite spider
+    // carry it. Faction membership is an AI-behavior assignment, not a visual one, so a creature-
+    // variety/reskin mod has no reason to strip it. This is the PRIMARY gate. RKF keywords are
+    // then used only as a best-effort REFINEMENT to route an already-confirmed predator into the
+    // right per-species toggle (Wolves/Bears/...) -- if that refinement can't identify the exact
+    // species (keyword missing, as with modded variants), default to "affected" rather than
+    // silently dropping a creature we already know is a predator.
+    SpeciesCategory FleeManager::GetSpeciesCategory(RE::Actor* actor)
     {
         auto* settings = Settings::GetSingleton();
-        if (!actor) return false;
+        if (!actor) return SpeciesCategory::kNone;
 
         if (settings->bUseKeywordFilter) {
-            return actor->HasKeywordString("TMD_PredatorFireFlee");
+            static auto* customKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("PFF_PredatorFireFlee");
+            return HasKeywordCascade(actor, customKeyword) ? SpeciesCategory::kPredator : SpeciesCategory::kNone;
         }
 
-        auto* race = actor->GetRace();
-        if (!race) return false;
+        auto hasRKF = [this, actor](const char* editorID) {
+            auto* kw = RE::TESForm::LookupByEditorID<RE::BGSKeyword>(editorID);
+            return HasKeywordCascade(actor, kw);
+        };
 
-        std::string_view edid = race->GetFormEditorID();
-        if (settings->bAffectWolves && edid.contains("Wolf")) return true;
-        if (settings->bAffectBears && edid.contains("Bear")) return true;
-        if (settings->bAffectSabreCats && edid.contains("SabreCat")) return true;
-        if (settings->bAffectTrolls && edid.contains("Troll")) return true;
+        // Spriggans are plant/magic-type hostiles -- confirmed via live load-order read that the
+        // base Spriggan actor carries CreatureFaction + SprigganFaction + SprigganPredatorFaction,
+        // but NOT plain PredatorFaction. Gated separately since the generic PredatorFaction check
+        // below would otherwise silently miss every spriggan.
+        static auto* sprigganFaction = RE::TESForm::LookupByEditorID<RE::TESFaction>("SprigganFaction");
+        if (sprigganFaction && actor->IsInFaction(sprigganFaction)) {
+            return settings->bAffectSpriggans ? SpeciesCategory::kPredator : SpeciesCategory::kNone;
+        }
+
+        static auto* predatorFaction = RE::TESForm::LookupByEditorID<RE::TESFaction>("PredatorFaction");
+        bool isPredatorFaction = predatorFaction && actor->IsInFaction(predatorFaction);
+
+        if (isPredatorFaction) {
+            bool isSpider = hasRKF("RKF_ActorTypeFrostSpider");
+            if (isSpider) return settings->bAffectSpiders ? SpeciesCategory::kSpider : SpeciesCategory::kNone;
+
+            bool identified = false, allowed = false;
+            auto check = [&](bool toggle, const char* editorID) {
+                if (hasRKF(editorID)) {
+                    identified = true;
+                    allowed = allowed || toggle;
+                }
+            };
+            check(settings->bAffectWolves, "RKF_ActorTypeWolf");
+            check(settings->bAffectBears, "RKF_ActorTypeBear");
+            check(settings->bAffectSabreCats, "RKF_ActorTypeSabreCat");
+            check(settings->bAffectTrolls, "RKF_ActorTypeTroll");
+            check(settings->bAffectIceWraiths, "RKF_ActorTypeIceWraith");
+
+            if (!identified) {
+                // Couldn't name the exact species (e.g. a creature-variety mod's custom race) --
+                // still a confirmed predator, so fall back to "affected" as long as the user
+                // hasn't disabled every predator species.
+                allowed = settings->bAffectWolves || settings->bAffectBears || settings->bAffectSabreCats ||
+                          settings->bAffectTrolls || settings->bAffectIceWraiths;
+            }
+            return allowed ? SpeciesCategory::kPredator : SpeciesCategory::kNone;
+        }
+
+        // Prey: no vanilla "PreyFaction" exists, so fall back to the broad vanilla
+        // ActorTypeAnimal keyword (race-cascaded) for anything that isn't already a recognized
+        // predator/spider/excluded actor -- catches deer/goat/horker/mammoth/skeever and any
+        // similar creature-variety replacement without needing per-species keyword coverage.
+        static auto* animalKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("ActorTypeAnimal");
+        if (HasKeywordCascade(actor, animalKeyword)) {
+            bool identified = false, allowed = false;
+            auto check = [&](bool toggle, const char* editorID) {
+                if (hasRKF(editorID)) {
+                    identified = true;
+                    allowed = allowed || toggle;
+                }
+            };
+            check(settings->bAffectDeer, "RKF_ActorTypeDeer");
+            check(settings->bAffectGoats, "RKF_ActorTypeGoat");
+            check(settings->bAffectHorkers, "RKF_ActorTypeHorker");
+            check(settings->bAffectMammoths, "RKF_ActorTypeMammoth");
+            check(settings->bAffectSkeevers, "RKF_ActorTypeSkeever");
+
+            if (!identified) {
+                allowed = settings->bAffectDeer || settings->bAffectGoats || settings->bAffectHorkers ||
+                          settings->bAffectMammoths || settings->bAffectSkeevers;
+            }
+            return allowed ? SpeciesCategory::kPrey : SpeciesCategory::kNone;
+        }
+
+        return SpeciesCategory::kNone;
+    }
+
+    bool FleeManager::IsExcluded(RE::Actor* actor)
+    {
+        static auto* horseKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("ActorTypeHorse");
+        static auto* dragonKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("ActorTypeDragon");
+        static auto* bossKeyword = RE::TESForm::LookupByEditorID<RE::BGSKeyword>("ActorTypeDLC1Boss");
+
+        if (HasKeywordCascade(actor, horseKeyword)) return true;
+        if (HasKeywordCascade(actor, dragonKeyword)) return true;
+        if (HasKeywordCascade(actor, bossKeyword)) return true;
+
+        // ActorTypeDLC1Boss only covers Dawnguard-added bosses; the general "this NPC is
+        // special" signal for everything else is the vanilla Unique flag on its base actor.
+        if (auto* base = actor->GetActorBase()) {
+            if (base->IsUnique()) return true;
+        }
 
         return false;
     }
 
     bool FleeManager::IsOnCooldown(RE::Actor* actor)
     {
-        auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f * 3600.0f;
-        auto it = cooldowns.find(actor->GetFormID());
-        if (it != cooldowns.end()) {
-            return now < it->second;
-        }
-        return false;
+        auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f;
+        auto it = trackers.find(actor->GetFormID());
+        return it != trackers.end() && now < it->second.cooldownUntil;
     }
 
     void FleeManager::SetCooldown(RE::Actor* actor)
     {
         auto* settings = Settings::GetSingleton();
-        auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f * 3600.0f;
-        cooldowns[actor->GetFormID()] = now + settings->fCooldown;
+        auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f;
+        trackers[actor->GetFormID()].cooldownUntil = now + settings->fCooldown / 3600.0f;
+    }
+
+    // Predators/spiders are already hostile to the player by their own vanilla faction
+    // relationship -- restoring their cached Confidence is enough to let their own aggression
+    // resume naturally (see the kNormal case in OnTick for why Confidence, not InitiateFlee, is
+    // the actual flee mechanism). Prey species have no vanilla combat behavior at all, so
+    // "attack" is approximated by forcing their Aggression actor value up; many prey races
+    // still won't produce real attack animations since they were never authored with any,
+    // which is a game-content limitation, not something fixable from this plugin alone.
+    void FleeManager::ResumeAggression(RE::Actor* actor, SpeciesCategory category, float confidenceToRestore)
+    {
+        if (auto* avOwner = actor->AsActorValueOwner()) {
+            avOwner->SetActorValue(RE::ActorValue::kConfidence, confidenceToRestore);
+            if (category == SpeciesCategory::kPrey) {
+                avOwner->SetActorValue(RE::ActorValue::kAggression, 2.0f); // Aggressive
+            }
+        }
+        actor->EvaluatePackage(true, true);
+    }
+
+    void FleeManager::OnTick()
+    {
+        auto* settings = Settings::GetSingleton();
+        if (!settings->bEnabled) {
+            logger::trace("PFF: OnTick called but bEnabled=false");
+            return;
+        }
+
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->GetParentCell()) {
+            logger::trace("PFF: OnTick called but no player/cell");
+            return;
+        }
+        auto cell = player->GetParentCell();
+        logger::trace("PFF: OnTick running, cell=0x{:X}", cell->GetFormID());
+
+        cell->ForEachReferenceInRange(player->GetPosition(), settings->fStalkDistance, [&](RE::TESObjectREFR& ref) {
+            auto* actor = ref.As<RE::Actor>();
+            if (!actor || actor->IsPlayerRef() || actor->IsDead()) return RE::BSContainer::ForEachResult::kContinue;
+            if (IsExcluded(actor)) return RE::BSContainer::ForEachResult::kContinue;
+
+            auto category = GetSpeciesCategory(actor);
+            if (category == SpeciesCategory::kNone) return RE::BSContainer::ForEachResult::kContinue;
+
+            auto& tracker = trackers[actor->GetFormID()];
+            logger::trace("PFF: {} (0x{:X}) category={} state={}", actor->GetName(), actor->GetFormID(),
+                          static_cast<int>(category), static_cast<int>(tracker.state));
+
+            switch (tracker.state) {
+            case FleeBehaviorState::kNormal: {
+                if (IsOnCooldown(actor)) {
+                    logger::trace("PFF: {} on cooldown, skipping", actor->GetName());
+                    break;
+                }
+                auto* holder = FindNearestLitLightHolder(cell, actor->GetPosition(), settings->fDetectionRadius);
+                if (holder) {
+                    // InitiateFlee (with or without StopCombat()) proved unreliable across two
+                    // full test rounds -- confirmed via live log that the actor's own combat
+                    // controller either kept re-closing distance every tick (no StopCombat) or,
+                    // once StopCombat() was added, just went idle/frozen instead of fleeing
+                    // (distance pinned exactly still for many ticks in a row). The real vanilla
+                    // mechanism for "make a combatant flee right now" is the Confidence actor
+                    // value: the engine's own combat controller reads it every AI think-cycle
+                    // (this is how naturally cowardly creatures/NPCs flee) -- so drive that
+                    // instead of fighting the controller with an externally injected package.
+                    auto* avOwner = actor->AsActorValueOwner();
+                    logger::info("PFF: {} detected lit light held by {} -- lowering Confidence to flee", actor->GetName(), holder->GetName());
+                    tracker.lightHolderID = holder->GetFormID();
+                    tracker.cachedConfidence = avOwner ? avOwner->GetActorValue(RE::ActorValue::kConfidence) : 2.0f;
+                    tracker.deterrentUntil = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f + settings->fFireCastLinger / 3600.0f;
+                    tracker.state = FleeBehaviorState::kStalking;
+                    if (avOwner) {
+                        avOwner->SetActorValue(RE::ActorValue::kConfidence, 0.0f); // Cowardly
+                    }
+                    actor->EvaluatePackage(true, true);
+                } else {
+                    logger::trace("PFF: {} no lit light holder within {} units", actor->GetName(), settings->fDetectionRadius);
+                }
+                break;
+            }
+
+            case FleeBehaviorState::kStalking: {
+                auto* holderActor = RE::TESForm::LookupByID<RE::Actor>(tracker.lightHolderID);
+                bool activeNow = holderActor && !holderActor->IsDead() && HasFireDeterrent(holderActor);
+                auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f;
+                if (activeNow) {
+                    // Refreshes every tick for a continuously-held torch (no behavior change there)
+                    // and re-extends the window on every fresh fire-spell cast caught mid-poll.
+                    tracker.deterrentUntil = now + settings->fFireCastLinger / 3600.0f;
+                }
+                bool stillLit = activeNow || now < tracker.deterrentUntil;
+                logger::trace("PFF: {} stalking, holder={} stillLit={}", actor->GetName(),
+                              holderActor ? holderActor->GetName() : "none", stillLit);
+
+                if (!stillLit) {
+                    // The light went out (or its holder is gone) -- the deterrent is gone.
+                    logger::info("PFF: {} light gone -- resuming aggression", actor->GetName());
+                    ResumeAggression(actor, category, tracker.cachedConfidence);
+                    SetCooldown(actor);
+                    tracker.state = FleeBehaviorState::kNormal;
+                    tracker.lightHolderID = 0;
+                }
+                // No re-approach handling needed: Confidence stays at Cowardly for the whole
+                // stalking state, so the engine's own combat AI keeps deciding to flee on its
+                // own, continuously, every one of its own AI ticks -- not just our 500ms polls.
+                break;
+            }
+
+            default:
+                break;
+            }
+
+            return RE::BSContainer::ForEachResult::kContinue;
+        });
     }
 }

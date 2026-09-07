@@ -1,6 +1,6 @@
 #pragma once
 
-namespace TMD_PFF::Menu
+namespace PFF::Menu
 {
     void Register();
     void Render();

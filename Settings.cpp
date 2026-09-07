@@ -1,6 +1,6 @@
 #include "Settings.h"
 
-namespace TMD_PFF
+namespace PFF
 {
     Settings* Settings::GetSingleton()
     {

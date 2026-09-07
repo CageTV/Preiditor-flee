@@ -1,5 +1,5 @@
 {
-  "name": "tmd-predator-flee-fire",
+  "name": "preditor-flee-fire",
   "version": "1.0.0",
   "dependencies": [
     "spdlog",
