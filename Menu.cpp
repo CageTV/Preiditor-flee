@@ -11,15 +11,20 @@ namespace PFF::Menu
         ImGui::Checkbox("Enable Mod", &settings->bEnabled);
 
         ImGui::Separator();
-        ImGui::Text("Detection (held torch/lantern, or actively casting a Fire spell -- not inventory)");
+        ImGui::Text("Detection (held torch/lantern, or actively casting an enabled spell type below -- not inventory)");
         ImGui::SliderFloat("Trigger Range", &settings->fDetectionRadius, 128.0f, 2048.0f, "%.0f");
         ImGui::SliderFloat("Stalk Range", &settings->fStalkDistance, 512.0f, 4096.0f, "%.0f");
         ImGui::SliderFloat("Attack Cooldown", &settings->fCooldown, 1.0f, 30.0f, "%.1f sec");
-        ImGui::SliderFloat("Fire Cast Linger", &settings->fFireCastLinger, 0.5f, 10.0f, "%.1f sec");
+        ImGui::SliderFloat("Spell Cast Linger", &settings->fSpellCastLinger, 0.5f, 10.0f, "%.1f sec");
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("A burst fire spell (Firebolt/Fireball) still counts as a deterrent for this\nlong after the cast ends -- a single cast is shorter than the detection poll.");
+            ImGui::SetTooltip("A burst spell cast (Firebolt/Fireball/Lightning Bolt/Poison Spray) still counts\nas a deterrent for this long after the cast ends -- a single cast is shorter\nthan the detection poll.");
+        ImGui::Checkbox("Fire Spells", &settings->bAffectFireSpells);
+        ImGui::SameLine();
+        ImGui::Checkbox("Lightning Spells", &settings->bAffectLightningSpells);
+        ImGui::SameLine();
+        ImGui::Checkbox("Poison Spells", &settings->bAffectPoisonSpells);
 
         ImGui::Separator();
         ImGui::Text("Predators (already hostile -- resumes attacking on its own once light is gone)");

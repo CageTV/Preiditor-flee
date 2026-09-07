@@ -11,12 +11,20 @@ namespace PFF
         float fDetectionRadius = 1024.0f; // trigger range: how close a lit torch/lantern must be
         float fStalkDistance = 2048.0f;   // how far the creature is allowed to drift while stalking
         float fCooldown = 5.0f;           // seconds before the same actor can be re-triggered after an attack
-        float fFireCastLinger = 3.0f;     // seconds a burst fire-spell cast (Firebolt/Fireball, not
-                                           // held Flames) still counts as "deterred" after the cast
-                                           // ends -- an instant cast is shorter than our 500ms poll,
-                                           // so without this the flee would collapse the very next tick
+        float fSpellCastLinger = 3.0f;     // seconds a burst spell cast (Firebolt/Fireball/Lightning
+                                           // Bolt/Poison Spray, not a held concentration effect)
+                                           // still counts as "deterred" after the cast ends -- an
+                                           // instant cast is shorter than our 500ms poll, so without
+                                           // this the flee would collapse the very next tick
 
         bool bUseKeywordFilter = false; // if true, ONLY actors with the PFF_PredatorFireFlee keyword are affected
+
+        // Spell-cast deterrents, in addition to a held torch/lantern (all default on, matching the
+        // existing fire-only behavior; Lightning simulates a fear of storms/loud noise, Poison
+        // simulates a reaction to the smell of decay)
+        bool bAffectFireSpells = true;
+        bool bAffectLightningSpells = true;
+        bool bAffectPoisonSpells = true;
 
         // Predator (naturally hostile -- resumes its own vanilla aggression once the light is gone)
         bool bAffectWolves = true;

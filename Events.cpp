@@ -26,12 +26,13 @@ namespace PFF
         return nullptr;
     }
 
-    // Actively invoking Destruction fire magic in a hand -- not merely having it equipped/selected
-    // (that's MagicCaster::State::kReady, which sits idle any time a spell is favorited/readied).
-    // Charging or casting is what actually produces visible flame, matching the "held lit torch"
-    // theme. Elemental type is read the same way the engine itself does: the effect's own
-    // EffectSetting.resistVariable == kResistFire (the field Flames/Firebolt/Fireball etc. carry).
-    bool FleeManager::IsCastingFireSpell(RE::Actor* actor)
+    // Actively invoking Destruction magic of a given element in a hand -- not merely having it
+    // equipped/selected (that's MagicCaster::State::kReady, which sits idle any time a spell is
+    // favorited/readied). Charging or casting is what actually produces the visible/audible
+    // effect, matching the "held lit torch" theme. Elemental type is read the same way the engine
+    // itself does: the effect's own EffectSetting.resistVariable (the field Flames/Firebolt/
+    // Fireball/Lightning Bolt/Poison Spray etc. all carry, tagged to their matching resist AV).
+    bool FleeManager::IsCastingElementalSpell(RE::Actor* actor, RE::ActorValue resistType)
     {
         if (!actor) return false;
         for (auto source : { RE::MagicSystem::CastingSource::kLeftHand, RE::MagicSystem::CastingSource::kRightHand }) {
@@ -42,7 +43,7 @@ namespace PFF
             if (state != RE::MagicCaster::State::kCharging && state != RE::MagicCaster::State::kCasting) continue;
 
             for (auto* effect : caster->currentSpell->effects) {
-                if (effect && effect->baseEffect && effect->baseEffect->data.resistVariable == RE::ActorValue::kResistFire) {
+                if (effect && effect->baseEffect && effect->baseEffect->data.resistVariable == resistType) {
                     return true;
                 }
             }
@@ -50,9 +51,14 @@ namespace PFF
         return false;
     }
 
-    bool FleeManager::HasFireDeterrent(RE::Actor* actor)
+    bool FleeManager::HasDeterrent(RE::Actor* actor)
     {
-        return GetHeldLight(actor) != nullptr || IsCastingFireSpell(actor);
+        auto* settings = Settings::GetSingleton();
+        if (GetHeldLight(actor) != nullptr) return true;
+        if (settings->bAffectFireSpells && IsCastingElementalSpell(actor, RE::ActorValue::kResistFire)) return true;
+        if (settings->bAffectLightningSpells && IsCastingElementalSpell(actor, RE::ActorValue::kResistShock)) return true;
+        if (settings->bAffectPoisonSpells && IsCastingElementalSpell(actor, RE::ActorValue::kPoisonResist)) return true;
+        return false;
     }
 
     RE::TESObjectREFR* FleeManager::FindNearestLitLightHolder(RE::TESObjectCELL* cell, const RE::NiPoint3& origin, float radius)
@@ -63,7 +69,7 @@ namespace PFF
         cell->ForEachReferenceInRange(origin, radius, [&](RE::TESObjectREFR& ref) {
             auto* actor = ref.As<RE::Actor>();
             if (!actor || actor->IsDead()) return RE::BSContainer::ForEachResult::kContinue;
-            if (!HasFireDeterrent(actor)) return RE::BSContainer::ForEachResult::kContinue;
+            if (!HasDeterrent(actor)) return RE::BSContainer::ForEachResult::kContinue;
 
             float dist = origin.GetDistance(actor->GetPosition());
             if (dist < nearestDist) {
@@ -293,7 +299,7 @@ namespace PFF
                     logger::info("PFF: {} detected lit light held by {} -- lowering Confidence to flee", actor->GetName(), holder->GetName());
                     tracker.lightHolderID = holder->GetFormID();
                     tracker.cachedConfidence = avOwner ? avOwner->GetActorValue(RE::ActorValue::kConfidence) : 2.0f;
-                    tracker.deterrentUntil = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f + settings->fFireCastLinger / 3600.0f;
+                    tracker.deterrentUntil = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f + settings->fSpellCastLinger / 3600.0f;
                     tracker.state = FleeBehaviorState::kStalking;
                     if (avOwner) {
                         avOwner->SetActorValue(RE::ActorValue::kConfidence, 0.0f); // Cowardly
@@ -307,12 +313,12 @@ namespace PFF
 
             case FleeBehaviorState::kStalking: {
                 auto* holderActor = RE::TESForm::LookupByID<RE::Actor>(tracker.lightHolderID);
-                bool activeNow = holderActor && !holderActor->IsDead() && HasFireDeterrent(holderActor);
+                bool activeNow = holderActor && !holderActor->IsDead() && HasDeterrent(holderActor);
                 auto now = RE::Calendar::GetSingleton()->GetCurrentGameTime() * 24.0f;
                 if (activeNow) {
                     // Refreshes every tick for a continuously-held torch (no behavior change there)
                     // and re-extends the window on every fresh fire-spell cast caught mid-poll.
-                    tracker.deterrentUntil = now + settings->fFireCastLinger / 3600.0f;
+                    tracker.deterrentUntil = now + settings->fSpellCastLinger / 3600.0f;
                 }
                 bool stillLit = activeNow || now < tracker.deterrentUntil;
                 logger::trace("PFF: {} stalking, holder={} stillLit={}", actor->GetName(),

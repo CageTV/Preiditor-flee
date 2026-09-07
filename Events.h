@@ -41,8 +41,8 @@ namespace PFF
 
         RE::TESObjectREFR* FindNearestLitLightHolder(RE::TESObjectCELL* cell, const RE::NiPoint3& origin, float radius);
         RE::TESObjectLIGH*  GetHeldLight(RE::Actor* actor);
-        bool                IsCastingFireSpell(RE::Actor* actor);
-        bool                HasFireDeterrent(RE::Actor* actor);
+        bool                IsCastingElementalSpell(RE::Actor* actor, RE::ActorValue resistType);
+        bool                HasDeterrent(RE::Actor* actor);
         bool                HasKeywordCascade(RE::Actor* actor, RE::BGSKeyword* keyword);
         SpeciesCategory     GetSpeciesCategory(RE::Actor* actor);
         bool                IsExcluded(RE::Actor* actor);
