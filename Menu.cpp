@@ -58,7 +58,11 @@ namespace PFF::Menu
         ImGui::Separator();
         if (ImGui::Button("Save Settings")) {
             settings->Save();
+#if __has_include(<RE/S/SendHUDMessage.h>)
+            RE::SendHUDMessage::ShowHUDMessage("PFF: Settings saved");
+#else
             RE::DebugNotification("PFF: Settings saved");
+#endif
         }
     }
 

@@ -66,7 +66,8 @@ namespace PFF
         RE::TESObjectREFR* nearest = nullptr;
         float nearestDist = radius;
 
-        cell->ForEachReferenceInRange(origin, radius, [&](RE::TESObjectREFR& ref) {
+        cell->ForEachReferenceInRange(origin, radius, [&](auto&& refArg) {
+            auto& ref = *compat::Ptr(refArg);
             auto* actor = ref.As<RE::Actor>();
             if (!actor || actor->IsDead()) return RE::BSContainer::ForEachResult::kContinue;
             if (!HasDeterrent(actor)) return RE::BSContainer::ForEachResult::kContinue;
@@ -266,7 +267,8 @@ namespace PFF
         auto cell = player->GetParentCell();
         logger::trace("PFF: OnTick running, cell=0x{:X}", cell->GetFormID());
 
-        cell->ForEachReferenceInRange(player->GetPosition(), settings->fStalkDistance, [&](RE::TESObjectREFR& ref) {
+        cell->ForEachReferenceInRange(player->GetPosition(), settings->fStalkDistance, [&](auto&& refArg) {
+            auto& ref = *compat::Ptr(refArg);
             auto* actor = ref.As<RE::Actor>();
             if (!actor || actor->IsPlayerRef() || actor->IsDead()) return RE::BSContainer::ForEachResult::kContinue;
             if (IsExcluded(actor)) return RE::BSContainer::ForEachResult::kContinue;
